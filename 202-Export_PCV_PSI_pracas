@@ -1,0 +1,85 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-47.92706501820535, -21.995230226231225],
+          [-47.92706501820535, -22.018148423393182],
+          [-47.87672531941384, -22.018148423393182],
+          [-47.87672531941384, -21.995230226231225]]], null, false),
+    setores2 = ee.FeatureCollection("projects/ee-urb-verde/assets/socioambiental_18_05_v3"),
+    municipios = ee.FeatureCollection("projects/urbverde/assets/SP_Municipios_POP");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+
+var output_version = 'v3'
+
+var pracas = ee.FeatureCollection("users/UrbVerde/AreasLivres_V7");
+
+var lista_anos = [2016,2017,2018,2019,2020,2021,2022,2023,2024]
+var list_cartas = ee.ImageCollection('projects/urbverde/assets/remote-sensing/PCV-S2')
+                    .aggregate_array('grid').distinct().getInfo()
+
+// Centralizando em São Carlos
+//Map.centerObject(estado_sp);
+
+//municipios = municipios//.filterBounds(geometry)
+pracas = pracas//.filterBounds(geometry)
+Map.addLayer(pracas,{},'pracas')
+
+//Map.addLayer(setores)
+//print(setores)
+//Map.centerObject(setores)
+
+
+// ==== MLME MÉDIO ====
+
+var indexes = function(ano){
+  
+    var veg = ee.ImageCollection('projects/urbverde/assets/remote-sensing/PCV-S2')
+    .filter(ee.Filter.eq('year',ano))
+    .mosaic()
+    .select(['veg_1'],['pcv']) // usar _1 para manter o controle do modelo utilizado
+   
+   var asf = ee.ImageCollection('projects/urbverde/assets/remote-sensing/PSI-S2')
+    .filter(ee.Filter.eq('year',ano))
+    .filter(ee.Filter.eq('version',2))
+    .mosaic()
+    .select(['p_edif'],['psi']) //percentual de superficie impermeavel
+   
+   var image = veg.addBands(asf);
+   print(image)
+   
+  //print('setores',setores)
+  var mean_index = image.reduceRegions({
+    collection:pracas, 
+    reducer:ee.Reducer.mean(),//.setOutputs(['veg_1_mean', 'asf_2_mean']), 
+    scale:10
+  })
+  
+
+//print('mean_Index',mean_index)
+
+//=====Exporta o mosaico como asset=======
+
+var assetID = 'Pracas_pcv_psi-'+ ano + '-' +output_version 
+Export.table.toAsset({
+  collection: ee.FeatureCollection(mean_index), 
+  description:assetID, 
+  assetId:'projects/ee-urb-verde/assets/v_2025/'+assetID,
+}) 
+
+  return mean_index
+}
+
+
+
+var index_table = lista_anos.map(indexes)
+
+
+
+

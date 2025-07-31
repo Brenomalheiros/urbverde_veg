@@ -1,0 +1,113 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      },
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.MultiPolygon(
+        [[[[-47.865483658206365, -22.024097836196905],
+           [-47.865483658206365, -22.02457523918353],
+           [-47.8646253513216, -22.02457523918353],
+           [-47.8646253513216, -22.024097836196905]]],
+         [[[-47.937667267215154, -21.980766819659546],
+           [-47.937667267215154, -22.026007438488524],
+           [-47.862222092044256, -22.026007438488524],
+           [-47.862222092044256, -21.980766819659546]]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+---Projeto Urbverde---
+Script para visualização e export do PCV em Mosaicos Landsat 8 
+
+NOTA: O modelo abaixo é resultado de validação realizada pelos autores. 
+Segunda a recomendação dos mesmos, sugere-se o uso dos modelos 
+Alto abedo, Vegetação e Asfalto ou a substiuição do asfalto por água.
+Nesse sentido, após observação, adotou-se o modelo com uso da fração de água como principa
+Se for usado modelo com asfalto deve-se descomentar a linha de asfalto e comentar as de água, e vice-versa
+
+*/
+var cartas = ee.FeatureCollection('projects/urbverde/assets/cartas_ibge')
+var sp = ee.FeatureCollection("projects/urbverde/assets/SP_Municipios_POP") //geometry
+var list = cartas.filterBounds(sp).aggregate_array('grid_name').getInfo()
+
+var yearList = [2016,2017,2018,2019,2020,2021,2022,2023,2024]
+var version = 2
+
+
+// ==== MLME ESTADO ====
+var mlme = function(img_col,feicao){
+
+  
+  var img = img_col.median().select('blue','green','red','nir','swir1','swir2')
+  
+  var mosaic = img.clip(feicao)
+
+
+  // MODELO LINEAR DE MISTURA ESPECTRA (MLME)
+  // Definindo os "endmenbers" pesquisa professor Rodrigo Hitoshi Endo e Fernando S. Kwakubo (2024)
+  var alto_albedo =  [0.16379000000000002, 0.17125, 0.19557000000000002, 0.22986, 0.29938000000000003, 0.28326]
+  var veg =          [0.09519000000000001, 0.08991, 0.06407, 0.38545, 0.15211000000000002, 0.06521]
+  //var agua =         [0.09041, 0.07104, 0.048580000000000005, 0.031630000000000005, 0.01085, 0.006470000000000001]
+  var asfalto =      [0.118792, 0.105599, 0.103947, 0.16671260000000002, 0.1497724, 0.1089134]
+
+  
+  // Função para aplicar o MLME no conjunto de imagens Landsat Filtrado na região
+  //var unmix = mosaic.unmix([alto_albedo, veg, agua], true, true).rename('alto_albedo', 'veg', 'agua').multiply(100).int8()
+  var unmix = mosaic.unmix([alto_albedo, veg, asfalto], true, true).rename('alto_albedo', 'veg', 'asfalto').multiply(100).int8()
+  
+  //Map.addLayer(unmix,{},'unmix')
+  return(unmix)      
+}
+
+var visSatellite = {
+  bands: ['red', 'green', 'blue'],
+  min: 0.043,
+  max: 0.36,
+  gamma: 1.1
+};
+
+//Cloud Mask
+// Função que mascara as nuvens
+var maskL8 = function(image) {
+  var qa = image.select('QA_PIXEL');
+  var mask = qa.bitwiseAnd(1 << 3).eq(0);
+  return image.updateMask(mask);
+};
+  
+yearList.forEach(function(year){
+  
+ list.forEach(function(grid){
+   
+  var ft = cartas.filter(ee.Filter.eq('grid_name',grid)).first()
+ 
+  var l8_t1 = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+        .filterBounds(ft.geometry())
+        .filterDate(year + '-01-01', year + '-12-30')
+        .filter(ee.Filter.lt('CLOUD_COVER', 20))
+        .sort('CLOUD_COVER',true)
+        .map(maskL8)
+        .select(['B2','B3','B4','B5','B6','B7'],['blue','green','red','nir','swir1','swir2'])
+        .limit(80)
+        
+  print('l8_t1',l8_t1)
+  //Map.addLayer(l8_t1.median(),visSatellite,'l8-'+year,false)  
+
+  var pcv = mlme(l8_t1,ft.geometry())
+  
+  Export.image.toAsset({
+    'image': pcv.set({'year': year,'grid':grid, 'version':version}),
+    'description':'PCV-L8-'+ grid + '-'+ year,
+    //Água: //'assetId': 'projects/urbverde/assets/remote-sensing/PCV-L8/' + grid + '-' + year + '-' + version,
+    'assetId': 'projects/urbverde/assets/remote-sensing/PCV-L8/Ab_Veg_Asf_' + grid + '-' + year + '-' + version,
+    'region': ft.geometry(),
+    'scale': 30,
+    "maxPixels": 1e13
+  })
+ })
+})
+

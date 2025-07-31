@@ -1,0 +1,79 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-47.940146822448476, -25.01509833907395],
+          [-47.940146822448476, -25.022214953397892],
+          [-47.93551196527074, -25.022214953397892],
+          [-47.93551196527074, -25.01509833907395]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+var setores_2022 = ee.FeatureCollection('projects/ee-urb-verde/assets/recortes_2025/SP_setores_universo')
+    setores_2022 = setores_2022.filter(ee.Filter.eq('NM_UF','São Paulo'))
+print(setores_2022.first())   
+
+Map.addLayer(setores_2022,{},'setores_2022',false)
+
+// Add the IRS index to the spatial filter
+var CO  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_CO');
+var NO  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_NO');
+var NE  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_NE');
+var SE1 = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_SE1');
+var SE2 = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_SE2');
+var SU  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_SU');
+
+var LTB_area = (NO.merge(NE).merge(CO).merge(SE1).merge(SE2).merge(SE2).merge(SU));
+
+var LTBvalue = 1000;
+var LTB_areaImg = LTB_area
+  .reduceToImage({
+    properties: ['b1'],
+    reducer: ee.Reducer.first()
+}).rename('b1').multiply(LTBvalue).unmask();
+
+// Streets, avenues and roads kernell
+//https://doi.org/10.1016/j.jag.2022.102791
+var roads = ee.ImageCollection('users/efjustiniano/IRS2021/roads/roads_200/roads_200').max();
+
+var constrBorderKernel = ee.ImageCollection('users/efjustiniano/IRS2021/landuseTransportImg/LTB200/LTBimg').sum();
+  
+var irs = ee.ImageCollection([roads, LTB_areaImg, constrBorderKernel]).max().reproject('EPSG:4326', null, 30);
+var irs_500 = irs.gte(500).selfMask()
+Map.addLayer(irs, {min:50, max:1500}, 'IRS', false)
+
+var pix_area = ee.Image.pixelArea().divide(1000000)
+
+
+var calc_Area = setores_2022.map(function (setor) {
+  var img = irs_500.clip(setor)
+  img = img.multiply(pix_area)
+  
+  var area = img.reduceRegion({
+     reducer: ee.Reducer.sum(),
+     geometry: setor.geometry(),
+     scale: 15,
+     maxPixels: 1e12
+    })
+    
+  area = ee.Number(area.get('b1'))
+  //print(area)  
+
+  setor = setor.set('Area_IVE_km2',area)
+  
+  //print(setor)
+  return setor
+})
+
+//print('calc_area:',calc_Area)
+
+var assetID = 'Setores_Censo_2022_IVE'
+
+Export.table.toAsset({
+  collection: calc_Area, 
+  description:assetID, 
+  assetId:'projects/ee-urb-verde/assets/recortes_2025/'+assetID, 
+}) 

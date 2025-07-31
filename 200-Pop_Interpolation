@@ -1,0 +1,102 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-53.242911607764135, -19.24389595205947],
+          [-53.242911607764135, -25.478145094186313],
+          [-43.926505357764135, -25.478145094186313],
+          [-43.926505357764135, -19.24389595205947]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+var version = 'v1'
+var censo_2022 = ee.FeatureCollection("projects/ee-urb-verde/assets/recortes_2025/Setores_Censo_2022_IVE")
+                                      .map(function(ft){
+                                        var pop = ft.getNumber('v0001')
+                                        var area = ft.getNumber('Area_IVE_km2').multiply(1000000)
+                                      
+                                        return ft.set('pop_m2',pop.divide(area))
+                                      })
+var censo_2010 = ee.FeatureCollection("projects/urbverde/assets/Setores_Censo_2010_IVE")
+                                      .map(function(ft){
+                                        var pop = ft.getNumber('V14')
+                                        var area = ft.getNumber('Area_IVE_km2').multiply(1000000)
+                                      
+                                        return ft.set('pop_m2',pop.divide(area))
+                                      })
+print(censo_2010.first())
+Map.addLayer(censo_2010,{},'censo_2010')
+Map.addLayer(censo_2022,{},'censo_2022')
+
+// Add the IRS index to the spatial filter
+var CO  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_CO');
+var NO  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_NO');
+var NE  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_NE');
+var SE1 = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_SE1');
+var SE2 = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_SE2');
+var SU  = ee.FeatureCollection('users/efjustiniano/IRS2021/landuseTransport/LTB_area/LTB_area_SU');
+
+var LTB_area = (NO.merge(NE).merge(CO).merge(SE1).merge(SE2).merge(SE2).merge(SU));
+
+var LTBvalue = 1000;
+var LTB_areaImg = LTB_area
+  .reduceToImage({
+    properties: ['b1'],
+    reducer: ee.Reducer.first()
+}).rename('b1').multiply(LTBvalue).unmask();
+
+// Streets, avenues and roads kernell
+//https://doi.org/10.1016/j.jag.2022.102791
+var roads = ee.ImageCollection('users/efjustiniano/IRS2021/roads/roads_200/roads_200').max();
+
+var constrBorderKernel = ee.ImageCollection('users/efjustiniano/IRS2021/landuseTransportImg/LTB200/LTBimg').sum();
+  
+var irs = ee.ImageCollection([roads, LTB_areaImg, constrBorderKernel]).max().reproject('EPSG:4326', null, 30);
+var irs_500 = irs.gte(500).selfMask().rename('first')
+
+
+
+var img_2022 = censo_2022.reduceToImage(['pop_m2'],ee.Reducer.first()).multiply(irs_500)
+Map.addLayer(img_2022,{},'densi_2022')
+
+var img_2010 = censo_2010.reduceToImage(['pop_m2'],ee.Reducer.first()).multiply(irs_500)
+Map.addLayer(img_2010,{},'densi_2010')
+
+
+var tx = img_2022.subtract(img_2010)
+    tx = tx.divide(2022-2010)
+    tx = tx.where(tx.lt(0), 0)
+Map.addLayer(tx,{min:-120000,max:120000,palette:['red','yellow','blue']},'tx')
+var years_list = ee.List.sequence(2011,2024).getInfo()
+
+var imc = ee.ImageCollection([])
+
+var pop_interpol = years_list.map(function(year){
+  var year_0 = img_2010
+  
+  var year_i = img_2010.add(tx.multiply(year-2010))
+      year_i = year_i.rename("pop_"+year).unmask()
+      //print(year_i)
+  //imc = imc.merge(year_i)
+  //Map.addLayer(year_i,{min:0,max:2000},'y_' + year,false)
+  return year_i
+})
+
+print("imc",pop_interpol)
+var result = ee.Image(pop_interpol)
+print(result)
+Map.addLayer(result,{min:0,max:2000},'teste',false)
+
+Export.image.toAsset({
+    'image': result,
+    'description':'Pop_interpolada_m2-' + version,
+    'assetId': 'projects/ee-urb-verde/assets/recortes_2025/Densidade_Pop_interpolada_m2-' + version,
+    'region': geometry,
+    'scale': 30,
+    "maxPixels": 1e13
+  })

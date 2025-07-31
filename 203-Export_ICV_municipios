@@ -1,0 +1,73 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-47.92706501820535, -21.995230226231225],
+          [-47.92706501820535, -22.018148423393182],
+          [-47.87672531941384, -22.018148423393182],
+          [-47.87672531941384, -21.995230226231225]]], null, false),
+    irs = ee.Image("projects/urbverde/assets/Mancha_Urbana-IRS500");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+ 
+var municipios = ee.FeatureCollection("projects/ee-urb-verde/assets/recortes_2025/POP_Interpolada_IVE")
+                    .filter(ee.Filter.eq('SIGLA','SP'))
+                    //.select(['CD_MUN','NM_MUN','SIGLA','Area_IVE_km2','AREA_KM2'])
+
+print(municipios)
+var input_version = 'v2'
+var output_version = 'v3'
+
+var lista_anos = [2016,2017,2018,2019,2020,2021,2022,2023,2024]
+var list_cartas = ee.ImageCollection('projects/urbverde/assets/remote-sensing/PCV-S2')
+                    .aggregate_array('grid').distinct().getInfo()
+
+// Centralizando em São Carlos
+//Map.centerObject(estado_sp);
+
+//municipios = municipios//.filterBounds(geometry)
+
+Map.addLayer(municipios,{},'municipios')
+
+//Map.addLayer(setores)
+//print(setores)
+//Map.centerObject(setores)
+
+var indexes = function(year){
+  var string_year = '_' + year
+      string_year = ee.String(string_year).slice(1)
+  print(string_year)
+  
+  var pcv_col = ee.FeatureCollection("projects/ee-urb-verde/assets/v_2025/Municipios_veg_asf-" + year + '-' + input_version)
+  
+  var ftc = municipios.map(function(ft){
+    
+    var centroid = ft.geometry().centroid()
+    var pcv = pcv_col.filterBounds(centroid).first()
+        pcv = pcv.getNumber('veg_1').divide(100) //float
+        
+    //ICV = veg_m2/hab
+    var icv = pcv.multiply(ft.getNumber('Area_IVE_km2').multiply(1000000)).divide(ft.getNumber(string_year))
+    
+    return ft.set('ICV_' + year,icv)
+  })
+  
+  print(ftc)
+//=====Exporta o mosaico como asset=======
+
+  var assetID = 'Municipios_ICV_'+ year + '-' +output_version 
+  Export.table.toAsset({
+    collection: ee.FeatureCollection(ftc).select(['CD_MUN','NM_MUN','SIGLA','Area_IVE_km2','AREA_KM2','ICV_' + year]), 
+    description:assetID, 
+    assetId:'projects/ee-urb-verde/assets/v_2025/'+assetID,
+  }) 
+
+  return ftc
+}
+
+
+var index_table = lista_anos.map(indexes)

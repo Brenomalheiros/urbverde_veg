@@ -1,0 +1,130 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-47.533366576205914, -23.501928721982814],
+          [-47.533366576205914, -23.60232531264377],
+          [-47.398784056674664, -23.60232531264377],
+          [-47.398784056674664, -23.501928721982814]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+---Projeto Urbverde---
+Script para visualização e export do NDVI em Mosaicos Sentinel-2
+
+*/
+var sp = ee.FeatureCollection('projects/urbverde/assets/SP_Municipios_POP')
+var yearList = [2024]//[2016,2017,2018,2019,2020,2021,2022,2023,2024]
+var version = 2
+
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60')
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+             qa.bitwiseAnd(cirrusBitMask).eq(0))
+
+  // Return the masked and scaled data, without the QA bands.
+  return image.updateMask(mask).divide(10000)
+      .select("B.*")
+      .copyProperties(image, ["system:time_start"])
+}
+
+
+//Função para cálculo do NDVI
+var getNDVI = function (image) {
+  var ndvi = image.expression(
+  '(nir - red)/(nir + red)',{
+    'nir': image.select('nir'),
+    'red': image.select('red')
+  }).rename('ndvi').multiply(100)
+  
+  return image.addBands(ndvi)
+}  
+
+var ndviVis = {
+  bands:['ndvi'],
+  min: -10,
+  max: 90,
+  palette: ['black', 'blanchedalmond', 'forestgreen']
+  /*palette:[
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901',
+    '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01',
+    '012E01', '011D01', '011301'
+  ]*/
+}
+  
+  
+yearList.map(function(year){
+  
+  //Obtenção de coleções de imagens para o período de interesse
+  var s2_collection = ee.ImageCollection("COPERNICUS/S2_HARMONIZED")
+          .filterBounds(sp)
+          .filterDate(year +'-01-01', year +'-12-31')
+          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  
+  //print('s2_collection:',s2_collection)
+  
+  
+  // Construção do mosaíco sem nuvens
+  //Função cloudMask retirada dos exemplos da documentação
+  var s2_median_composite = s2_collection.median()
+                                  //.map(function(img){return img.divide(10000)})
+                                  .select(['B2','B3','B4','B8'],['blue','green','red','nir'])
+                                  .clip(sp).divide(10000)
+  //print('s2_median_composite:',s2_median_composite)                                
+  
+  var s2_cloudMask_composite = s2_collection.map(maskS2clouds)
+                                  .select(['B2','B3','B4','B8'],['blue','green','red','nir'])
+                                  .median()
+                                  .clip(sp)
+  //print('s2_cloudMask_composite:',s2_cloudMask_composite)                    
+  
+ 
+  var bands = ['red','green','blue']
+  //Map.addLayer(s2_median_composite,{bands:bands, min:0.03, max:0.2 },'Mosaico S2_mediana-'+year)
+  //Map.addLayer(s2_cloudMask_composite,{bands:bands, min:0.03, max:0.2 },'Mosaico S2_cloudMask-'+year,false)
+  
+  
+  //Calculo do NDVI
+  var s2_cm_ndvi = getNDVI(s2_cloudMask_composite)
+    .select('ndvi')
+    .int8()
+    .set({'year':year})
+  //Map.addLayer(s2_cm_ndvi, ndviVis,'NDVI_' + year)
+  
+  /*
+  Export.image.toDrive({
+    		image:s2_cm_ndvi,
+      	description:'NDVI-10m-'+year,
+        folder:'URBVERDE-EXPORT/PCV_Praças-beta',
+    	  fileNamePrefix:'NDVI-10m-'+year,
+      	region:sp.geometry(),
+      	scale:10,
+      	maxPixels:1e13,
+      	fileFormat:'GeoTIFF',
+    //	formatOptions:,
+    })
+  
+  */
+  Export.image.toAsset({
+    'image': s2_cm_ndvi,
+    'description':'NDVI-Sentinel-2-'+ year,
+    'assetId': 'projects/urbverde/assets/remote-sensing/NDVI-S2/'+ version + '-' + year,
+    'region': sp,
+    'scale': 10,
+    "maxPixels": 1e13
+  })
+  
+})
+

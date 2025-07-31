@@ -1,0 +1,23 @@
+var year_list = [2016,2017,2018,2019,2020,2021,2022,2023,2024]
+var version = 'v2'
+year_list.map(function (year){
+  
+  var asset_list = [
+    'Municipios_veg_asf-'+year+'-'+version, 'Pracas_veg_asf-'+year+'-'+version, 'Setores_veg_asf-'+year+'-'+version,
+    'Municipios_ICV_'+year+'-'+version,
+]
+  asset_list.map(function (name){
+    
+    //var asset = ee.FeatureCollection('projects/ee-urb-verde/assets/variaveis/'+name)
+    var asset = ee.FeatureCollection('projects/ee-urb-verde/assets/v_2025/'+name)
+    
+    Export.table.toDrive({
+    collection:asset,
+    description:name,
+    folder:'URBVERDE-EXPORT_2025',
+    fileFormat:'CSV',
+    })
+    
+  })
+  
+})

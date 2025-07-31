@@ -1,0 +1,138 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-47.92706501820535, -21.995230226231225],
+          [-47.92706501820535, -22.018148423393182],
+          [-47.87672531941384, -22.018148423393182],
+          [-47.87672531941384, -21.995230226231225]]], null, false),
+    irs = ee.Image("projects/urbverde/assets/Mancha_Urbana-IRS500");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+
+var densidade = ee.Image('projects/ee-urb-verde/assets/recortes_2025/Densidade_Pop_interpolada_m2-v1').unmask()
+var bairros = ee.FeatureCollection("projects/ee-urb-verde/assets/recortes_2025/SP_bairros_CD2022")
+                    
+                    
+// Check the basic properties of densidade
+print('densidade ID:', densidade.id());
+print('densidade projection:', densidade.projection());
+
+// Try a simple operation like getting the image bounds
+var bounds = densidade.geometry().bounds();
+print('densidade bounds:', bounds);
+
+// Display the image to see if it appears
+Map.addLayer(densidade, {min: 0, max: 100, bands: ['pop_2016']}, 'Densidade 2016', false);                    
+                    
+                    
+                    
+
+print(bairros)
+var input_version = 'v3'
+var output_version = 'v3'
+
+var lista_anos = [2016,2017,2018,2019,2020,2021,2022,2023,2024]
+var list_cartas = ee.ImageCollection('projects/urbverde/assets/remote-sensing/PCV-S2')
+                    .aggregate_array('grid').distinct().getInfo()
+
+
+// Centralizando em São Carlos
+//Map.centerObject(estado_sp);
+
+//municipios = municipios//.filterBounds(geometry)
+
+Map.addLayer(bairros,{},'bairros')
+
+
+var indexes = function(year){
+  // Get the required collections
+  var pcv_col = ee.FeatureCollection("projects/ee-urb-verde/assets/v_2025/Bairros_pcv_psi-" + year + '-' + input_version);
+  
+  // Map over each sector to calculate ICV
+  var ftc = bairros.map(function(ft){
+    // Get centroid to find matching PCV feature
+    var centroid = ft.geometry().centroid();
+    
+    // Get PCV data
+    var pcv_features = pcv_col.filterBounds(centroid);
+    var pcv_size = pcv_features.size();
+    var pcv = pcv_features.first();
+    
+    // Use simpler conditional to get veg value
+    var veg_value = ee.Algorithms.If(
+      pcv_size.gt(0),
+      pcv.get('veg_1'),
+      0
+    );
+    
+    // Convert to number and divide by 100
+    veg_value = ee.Number(veg_value).divide(100);
+    
+    // Get area in km² and cast to m2
+    var ive_area = ft.geometry().area();
+    
+    // Try to get population
+    var pop_data = densidade.select(['pop_'+year]).reduceRegion({
+      reducer: ee.Reducer.mean(), 
+      geometry: ft.geometry(), 
+      scale: 30,
+      bestEffort: false
+    });
+    
+    // Get population value with default
+    var pop_value = ee.Algorithms.If(
+      ee.Dictionary(pop_data).contains('pop_'+year),
+      pop_data.get('pop_'+year),
+      0
+    );
+    
+    // Convert to number
+    pop_value = ee.Number(pop_value);
+    
+    // Calculate ICV - only if we have valid data
+    var has_data = ee.Algorithms.If(
+      pcv_size.gt(0).and(pop_value.gt(0)),
+      1,
+      0
+    );
+    
+    // Calculate ICV with safety check
+    var icv = ee.Algorithms.If(
+      ee.Number(has_data).eq(1),
+      veg_value.multiply(ive_area).divide(pop_value),
+      0
+    );
+    
+    // Return feature with new properties
+    return ft.set('ICV_' + year, icv)
+             .set('veg_value', veg_value)
+             .set('pop_value', pop_value)
+             .set('has_data', has_data);
+  });
+  
+  // Filter to valid results only
+  var valid_results = ftc.filter(ee.Filter.eq('has_data', 1));
+  print('Valid results count for ' + year + ':', valid_results.size());
+  
+  // Visualize
+  Map.addLayer(valid_results, {}, 'ICV ' + year);
+  
+  // Export
+  var assetID = 'Bairros_ICV_'+ year + '-' +output_version; 
+  Export.table.toAsset({
+    collection: ftc, 
+    description: assetID, 
+    assetId: 'projects/ee-urb-verde/assets/v_2025/'+assetID,
+  });
+  
+  return ftc;
+};
+
+var index_table = lista_anos.map(indexes)
+ 

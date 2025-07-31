@@ -1,0 +1,63 @@
+var densidade = ee.Image('projects/ee-urb-verde/assets/recortes_2025/Densidade_Pop_interpolada_m2-v1').unmask();
+var setores = ee.FeatureCollection("projects/ee-urb-verde/assets/recortes_2025/Setores_Censo_2022_IVE")
+                .select(['CD_SETOR','CD_MUN','NM_MUN','CD_SIT','Area_IVE_km2','AREA_KM2']);
+//print(densidade);
+//Map.addLayer(densidade);
+Map.addLayer(setores);
+
+var lista_anos = [2016,2017,2018,2019,2020,2021,2022,2023,2024];
+
+var setores_final = lista_anos.reduce(function(ftc, year){
+  var pop_density = densidade.select(['pop_' + year]);
+  var area = ee.Image.pixelArea().reproject({crs:'EPSG:4326', scale: 30});
+  
+  // Calcula a população por pixel
+  var pop_pixel = pop_density.multiply(area).round();
+  
+  ftc = ftc.map(function(ft){
+    // calcula a população por setor, somando os pixels
+    var pop_data = pop_pixel.select(['pop_'+year]).reduceRegion({
+      reducer: ee.Reducer.sum(), 
+      geometry: ft.geometry(), 
+      scale: 30,
+      bestEffort: false
+    });
+    
+    var pop_value = ee.Algorithms.If(
+      ee.Dictionary(pop_data).contains('pop_'+year),
+      ee.Number(pop_data.get('pop_'+year)),
+      0
+    );
+    
+    return ft.set('pop_' + year, pop_value);
+  });
+  
+  return ftc;
+}, setores);
+
+// Exporta como asset
+var assetID = 'Setores_Pop_interpolada_2016_2024';
+Export.table.toAsset({
+  collection: setores_final.select([
+    'CD_SETOR', 'CD_SIT', 'CD_MUN', 'NM_MUN', 
+    'Area_IVE_km2', 'AREA_KM2'
+  ].concat(lista_anos.map(function(y){ return 'pop_' + y; }))),
+  description: assetID,
+  assetId: 'projects/ee-urb-verde/assets/recortes_2025/' + assetID,
+});
+
+// Exporta como CSV no Drive, sem a geometria
+Export.table.toDrive({
+  collection: setores_final.select([
+    'CD_SETOR', 'CD_SIT', 'CD_MUN', 'NM_MUN', 
+    'Area_IVE_km2', 'AREA_KM2'
+  ].concat(lista_anos.map(function(y){ return 'pop_' + y; }))),
+  description: 'DRIVE-Setores_Pop_interpolada_2016_2024', 
+  fileFormat: 'CSV',
+  selectors: [
+    'CD_SETOR', 'CD_SIT', 'CD_MUN', 'NM_MUN', 
+    'Area_IVE_km2', 'AREA_KM2'
+  ].concat(lista_anos.map(function(y){ return 'pop_' + y; })), // Retira a geometria
+  folder: 'GEE_Exports', // (opcional)
+  fileNamePrefix: 'Setores_Pop_interpolada_2016_2024'
+});

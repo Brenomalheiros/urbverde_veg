@@ -1,0 +1,134 @@
+/*
+---Projeto Urbverde---
+Script para visualização e export do PCV em Mosaicos Sentinel 2 - 10m 
+
+NOTA: O modelo abaixo é resultado de validação realizada pelos autores. 
+Segunda a recomendação dos mesmos, sugere-se o uso dos modelos 
+Alto abedo, Vegetação e Asfalto ou a substiuição do asfalto por água.
+Nesse sentido, após observação, adotou-se o modelo com uso da fração de água como principa
+Se for usado modelo com asfalto deve-se descomentar a linha de asfalto e comentar as de água, e vice-versa
+
+*/
+var cartas = ee.FeatureCollection('projects/urbverde/assets/cartas_ibge')
+var sp = ee.FeatureCollection("projects/urbverde/assets/SP_Municipios_POP") //geometry
+var list = cartas.filterBounds(sp).aggregate_array('grid_name').getInfo()
+
+var yearList = [2024]// [2016,2017,2018,2019,2020,2021,2022,2023,2024]
+var version = 2
+
+
+// ==== MLME ESTADO ====
+var mlme_2 = function(img_col,feicao){
+
+  
+  var img = img_col.select('blue','green','red','nir','swir1','swir2')
+  
+  var mosaic = img.clip(feicao)
+
+
+  // MODELO LINEAR DE MISTURA ESPECTRA (MLME)
+  // Definindo os "endmenbers" pesquisa professor Rodrigo Hitoshi Endo e Fernando S. Kwakubo (2024)
+  var alto_albedo =  [0.16379000000000002, 0.17125, 0.19557000000000002, 0.22986, 0.29938000000000003, 0.28326]
+  var veg =          [0.09519000000000001, 0.08991, 0.06407, 0.38545, 0.15211000000000002, 0.06521]
+  var agua =         [0.09041, 0.07104, 0.048580000000000005, 0.031630000000000005, 0.01085, 0.006470000000000001]
+  var asfalto =      [0.118792, 0.105599, 0.103947, 0.16671260000000002, 0.1497724, 0.1089134]
+
+  
+  // Função para aplicar o MLME no conjunto de imagens Landsat Filtrado na região
+  var unmix = mosaic.unmix([alto_albedo, veg, asfalto], true, true)
+  .rename('alto_albedo_2', 'veg_2', 'asfalto_2')
+  .multiply(100)
+  .int8()
+  
+  //Map.addLayer(unmix,{},'unmix')
+  return(unmix)      
+}
+
+var mlme_1= function(img_col,feicao){
+
+  
+  var img = img_col.select('blue','green','red','nir','swir1','swir2')
+  
+  var mosaic = img.clip(feicao)
+
+
+  // MODELO LINEAR DE MISTURA ESPECTRA (MLME)
+  // Definindo os "endmenbers" pesquisa professor Rodrigo Hitoshi Endo e Fernando S. Kwakubo (2024)
+  var alto_albedo =  [0.16379000000000002, 0.17125, 0.19557000000000002, 0.22986, 0.29938000000000003, 0.28326]
+  var veg =          [0.09519000000000001, 0.08991, 0.06407, 0.38545, 0.15211000000000002, 0.06521]
+  var agua =         [0.09041, 0.07104, 0.048580000000000005, 0.031630000000000005, 0.01085, 0.006470000000000001]
+  //var asfalto =      [0.118792, 0.105599, 0.103947, 0.16671260000000002, 0.1497724, 0.1089134]
+
+  
+  // Função para aplicar o MLME no conjunto de imagens Landsat Filtrado na região
+  var unmix = mosaic.unmix([alto_albedo, veg, agua], true, true)
+  .rename('alto_albedo_1', 'veg_1', 'agua_1')
+  .multiply(100)
+  .int8()
+  
+  //Map.addLayer(unmix,{},'unmix')
+  return(unmix)      
+}
+
+//Cloud Mask
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60')
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+             qa.bitwiseAnd(cirrusBitMask).eq(0))
+
+  // Return the masked and scaled data, without the QA bands.
+  return image.updateMask(mask).divide(10000)
+      .select("B.*")
+      .copyProperties(image, ["system:time_start"])
+}
+
+yearList.forEach(function(year){
+  
+ list.forEach(function(grid){
+   
+  var ft = cartas.filter(ee.Filter.eq('grid_name',grid)).first()
+ 
+  //Obtenção de coleções de imagens para o período de interesse
+  var s2_collection = ee.ImageCollection("COPERNICUS/S2_HARMONIZED")
+          .filterBounds(sp)
+          .filterDate(year +'-01-01', year +'-12-31')
+          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  
+  //print('s2_collection:',s2_collection)
+  
+  
+  // Construção do mosaíco sem nuvens
+  //Função cloudMask retirada dos exemplos da documentação
+  var s2_cloudMask_composite = s2_collection.map(maskS2clouds)
+                                  .select(['B2','B3','B4','B8','B11','B12'],['blue','green','red','nir','swir1','swir2'])
+                                  .median()
+                                  .clip(sp)
+  //print('s2_cloudMask_composite:',s2_cloudMask_composite)                    
+  
+ 
+  var bands = ['red','green','blue']
+  
+  //Map.addLayer(s2_cloudMask_composite,{bands:bands, min:0.03, max:0.2 },'Mosaico S2_cloudMask-'+year,false)  
+
+  var pcv = ee.Image([mlme_1(s2_cloudMask_composite,ft.geometry()), mlme_2(s2_cloudMask_composite,ft.geometry())])
+  //print(pcv)
+  
+  
+  Export.image.toAsset({
+    'image': pcv.set({'year': year,'grid':grid, 'version':version}),
+    'description':'PCV-S2-'+ grid + '-'+ year,
+    'assetId': 'projects/urbverde/assets/remote-sensing/PCV-S2/' + grid + '-' + year + '-' + version,
+    'region': ft.geometry(),
+    'scale': 10,
+    "maxPixels": 1e13
+  })
+ })
+})
+

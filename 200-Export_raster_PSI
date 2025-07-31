@@ -1,0 +1,183 @@
+// === Parâmetros gerais ===
+var sp = ee.FeatureCollection("projects/urbverde/assets/SP_Municipios_POP");
+var cartas = ee.FeatureCollection('projects/urbverde/assets/cartas_ibge');
+var list = cartas.filterBounds(sp).aggregate_array('grid_name').getInfo();
+
+var anoTreino = 2023;  // Ano para treino do modelo
+var yearList = ee.List.sequence(2016, 2024).getInfo();
+var version = 2;
+
+// === Função para calcular p_edif ===
+var colBuildings = ee.ImageCollection('GOOGLE/Research/open-buildings-temporal/v1');
+var lotes = ee.FeatureCollection("projects/urbverde/assets/DIADEMA-LOTE_FISCAL");
+
+function calcularPEdif() {
+  var latestImage = colBuildings
+    .filterBounds(lotes.geometry())
+    .sort('system:time_start', false)
+    .first();
+
+  var buildingPresence = latestImage.select('building_presence');
+  var builtMask = buildingPresence.gte(0.6);
+  var pixelArea = ee.Image.pixelArea();
+  var builtArea = builtMask.multiply(pixelArea).rename('built_area');
+
+  var areaPorLote = builtArea.reduceRegions({
+    collection: lotes,
+    reducer: ee.Reducer.sum(),
+    scale: 3,
+    crs: 'EPSG:4326'
+  });
+
+  var lotesComPEdif = areaPorLote.map(function(feature) {
+    var areaEdificada = ee.Number(feature.get('sum'));
+    var areaTotal = feature.geometry().area();
+    var pEdif = areaEdificada.divide(areaTotal).multiply(100);
+    return feature.set({
+      'area_edificada': areaEdificada,
+      'area_total': areaTotal,
+      'p_edif': pEdif
+    });
+  });
+  return lotesComPEdif;
+}
+
+// === Treinar o modelo (apenas 1 ano) ===
+function treinarModelo(ano) {
+  var mosaic = ee.ImageCollection('projects/urbverde/assets/remote-sensing/PCV-S2')
+    .filter(ee.Filter.eq('year', ano))
+    .mosaic();
+
+  var lotesComPEdif = calcularPEdif();
+  var bands = ['veg_1', 'asfalto_2', 'alto_albedo_1']
+  var mosaicSel = mosaic.select(bands);
+  
+  var training = mosaicSel.reduceRegions({
+    collection: lotesComPEdif.filter(ee.Filter.notNull(['p_edif'])),
+    reducer: ee.Reducer.first().forEach(bands),
+    scale: 10
+  });
+
+
+  var validSamples = training.filter(ee.Filter.notNull(['p_edif', 'veg_1', 'asfalto_2', 'alto_albedo_1']));
+
+  //print ('amostras',validSamples.sort('p_edif',false).limit(100))
+  
+  var rf = ee.Classifier.smileRandomForest(350)
+    .train({
+      features: validSamples,
+      classProperty: 'p_edif',
+      inputProperties: bands
+    }).setOutputMode('REGRESSION');
+
+  return rf;
+}
+
+var rfModel = treinarModelo(anoTreino);
+
+// === Processar por carta e ano com RWI e exportar ===
+yearList.forEach(function(ano) {
+  list.forEach(function(grid) {
+    var ft = cartas.filter(ee.Filter.eq('grid_name', grid)).first();
+    
+    var bands = ['veg_1', 'asfalto_2', 'alto_albedo_1']
+    
+    // Mosaico PCV-S2 do ano
+    var mosaic = ee.ImageCollection('projects/urbverde/assets/remote-sensing/PCV-S2')
+      .filter(ee.Filter.eq('year', ano))
+      .mosaic()
+      .clip(ft.geometry())
+      .select(bands)
+    
+    //Cloud Mask
+
+  function maskS2clouds(image) {
+    var qa = image.select('QA60')
+  
+    // Bits 10 and 11 are clouds and cirrus, respectively.
+    var cloudBitMask = 1 << 10;
+    var cirrusBitMask = 1 << 11;
+  
+    // Both flags should be set to zero, indicating clear conditions.
+    var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+               qa.bitwiseAnd(cirrusBitMask).eq(0))
+  
+    // Return the masked and scaled data, without the QA bands.
+    return image.updateMask(mask).divide(10000)
+        .select("B.*")
+        .copyProperties(image, ["system:time_start"])
+  }
+  
+    // Calcular RWI no Sentinel-2
+    var s2Col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED") 
+      .filterBounds(ft.geometry())
+      .filterDate(ano + '-01-01', ano + '-12-31')
+      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+      .map(maskS2clouds)
+    
+    var s2Mosaic = s2Col.median();
+    var green = s2Mosaic.select('B3');
+    var swir1 = s2Mosaic.select('B11');
+    var e = Math.E;
+    var md = green.reduceRegion({
+      reducer: ee.Reducer.median(),
+      geometry: ft.geometry(),
+      scale: 10,
+      bestEffort: true
+    }).get('B3');
+
+    var greenExp = green.pow(e - 1);
+    var n = ee.Image(ee.Number(md)).multiply(greenExp).divide(
+      ee.Image(ee.Number(md)).multiply(green)
+    );
+
+    var rwi = greenExp.multiply(n.pow(-1)).subtract(swir1)
+      .divide(greenExp.multiply(n.pow(-1)).add(swir1))
+      .rename('RWI');
+
+    var waterMask = rwi.gt(0);  // Ajuste do threshold se necessário
+
+    // Previsão do p_edif
+    var predicted = mosaic.select(bands).classify(rfModel)
+      .rename('p_edif')
+    
+    // Calcular min e max
+    var minMax = predicted.reduceRegion({
+      reducer: ee.Reducer.minMax(),
+      geometry: ft.geometry(),
+      scale: 10,
+      bestEffort: true
+    })
+    
+    var minVal = ee.Number(minMax.getNumber('p_edif_min'));
+    var maxVal = ee.Number(minMax.getNumber('p_edif_max'));
+    var range = maxVal.subtract(minVal).max(1);  // Evitar divisão por zero
+    
+    // Reescalar para 0–100
+    var predictedRescaled = predicted.subtract(minVal)
+      .divide(range)
+      .multiply(100)
+      .round()
+      .updateMask(waterMask.not())
+      .updateMask(sp.reduceToImage(['POP_2020'], ee.Reducer.first()).mask())
+      .toInt8()
+      .clamp(0, 100)
+      .clip(ft.geometry());
+    
+    //print(predictedRescaled)
+    //Map.addLayer(predictedRescaled)
+    
+    // Exportar normalmente
+    Export.image.toAsset({
+      image: predictedRescaled.set({'year': ano, 'grid': grid, 'version': version}),
+      description: 'predicted_p_edif_' + grid + '_' + ano,
+      assetId: 'projects/urbverde/assets/remote-sensing/PSI-S2/' + grid + '-' + ano + '-' + version,
+      region: ft.geometry(),
+      scale: 10,
+      maxPixels: 1e13
+    });
+    
+  });
+});
+
+print('Processo finalizado! Lembre-se de iniciar as tarefas no painel "Tasks".');
